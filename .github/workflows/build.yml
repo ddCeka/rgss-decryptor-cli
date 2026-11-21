@@ -1,0 +1,151 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            artifact_name: rgssdecrypter-linux-x86_64
+            static_artifact_name: rgssdecrypter-linux-x86_64-static
+            build_static: true
+            ext: ""
+          - name: macOS arm64
+            os: macos-latest
+            artifact_name: rgssdecrypter-macos-arm64
+            static_artifact_name: ""
+            build_static: false
+            ext: ""
+          - name: Windows x86_64
+            os: windows-latest
+            artifact_name: rgssdecrypter-windows-x86_64.exe
+            static_artifact_name: rgssdecrypter-windows-x86_64-static.exe
+            build_static: true
+            ext: ".exe"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+
+      - name: Build standard binary
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="/mingw64/bin:/usr/bin:$PATH"
+          fi
+          make
+          mv "rgssdecrypter${{ matrix.ext }}" "${{ matrix.artifact_name }}"
+
+      - name: Build static binary
+        if: matrix.build_static
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="/mingw64/bin:/usr/bin:$PATH"
+          fi
+          make clean
+          make LDFLAGS="-lm -static"
+          mv "rgssdecrypter${{ matrix.ext }}" "${{ matrix.static_artifact_name }}"
+
+      - name: Run round-trip pack/unpack test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="/mingw64/bin:/usr/bin:$PATH"
+          fi
+
+          test_binary() {
+            local bin="$1"
+            echo "Testing $bin..."
+            "./$bin" --help
+
+            rm -rf test_in test_out test_game.rgss3a
+            mkdir -p test_in/Data
+            printf "hello rgss3 roundtrip test" > test_in/Data/Test.txt
+
+            "./$bin" --pack test_in test_game.rgss3a
+            "./$bin" -i test_game.rgss3a
+            "./$bin" -p -o test_out test_game.rgss3a
+
+            cmp -s test_in/Data/Test.txt test_out/Data/Test.txt
+            test -f test_out/Game.rvproj2
+            rm -rf test_in test_out test_game.rgss3a
+          }
+
+          test_binary "${{ matrix.artifact_name }}"
+          if [ "${{ matrix.build_static }}" = "true" ]; then
+            test_binary "${{ matrix.static_artifact_name }}"
+          fi
+
+      - name: Upload standard binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+
+      - name: Upload static binary artifact
+        if: matrix.build_static
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.static_artifact_name }}
+          path: ${{ matrix.static_artifact_name }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: release-assets
+        run: |
+          sha256sum rgssdecrypter-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/rgssdecrypter-linux-x86_64
+            release-assets/rgssdecrypter-linux-x86_64-static
+            release-assets/rgssdecrypter-macos-arm64
+            release-assets/rgssdecrypter-windows-x86_64.exe
+            release-assets/rgssdecrypter-windows-x86_64-static.exe
+            release-assets/SHA256SUMS.txt
