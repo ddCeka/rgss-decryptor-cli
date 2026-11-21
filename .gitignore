@@ -1,0 +1,11 @@
+*.o
+*.obj
+*.dSYM/
+rgssdecrypter
+pkg/
+src/
+*.pkg.tar.*
+*.rgssad
+*.rgss2a
+*.rgss3a
+Extracted/
