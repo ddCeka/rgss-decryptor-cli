@@ -816,10 +816,15 @@ bool rgss_archive_pack(const char* source_dir, const char* out_archive_path, boo
 
     qsort(list.items, list.count, sizeof(PackEntry), compare_pack_entries);
 
-    printf("%s------%s\n", g_colors.muted, g_colors.reset);
-    printf("Packing %s%zu%s Files (RGSS v%d)\n", g_colors.bold, list.count, g_colors.reset, version);
-    printf("Output Archive: %s%s%s\n", g_colors.dir, out_archive_path, g_colors.reset);
-    printf("%s------%s\n", g_colors.muted, g_colors.reset);
+    printf("%s----------------------------------------%s\n", g_colors.muted, g_colors.reset);
+    printf("%sPacking%s  %s%zu%s files %s(RGSS v%d)%s\n",
+           g_colors.bold, g_colors.reset,
+           g_colors.ok, list.count, g_colors.reset,
+           g_colors.muted, version, g_colors.reset);
+    printf("%sArchive%s  %s%s%s\n",
+           g_colors.bold, g_colors.reset,
+           g_colors.dir, out_archive_path, g_colors.reset);
+    printf("%s----------------------------------------%s\n", g_colors.muted, g_colors.reset);
 
     FILE* out = fopen(out_archive_path, "wb");
     if (!out) {

@@ -1,5 +1,7 @@
 # Makefile for rgssdecrypter (Arch Linux, Termux on Android, & cross-platform)
 
+VERSION ?= 1.1
+
 UNAME_O := $(shell uname -o 2>/dev/null)
 
 # Detect Termux / Android vs Desktop Linux (Arch, etc.)
@@ -19,6 +21,7 @@ endif
 BINDIR ?= $(PREFIX)/bin
 
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -D_FILE_OFFSET_BITS=64
+CPPFLAGS += -DAPP_VERSION=\"$(VERSION)\"
 LDFLAGS ?= -lm
 
 TARGET = rgssdecrypter
@@ -39,7 +42,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 %.o: %.c rgss_lib.h
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 debug: CFLAGS = -std=c11 -g -O0 -Wall -Wextra -Wpedantic -D_FILE_OFFSET_BITS=64 -fsanitize=address,undefined
 debug: LDFLAGS += -fsanitize=address,undefined

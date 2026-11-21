@@ -25,6 +25,10 @@
 
 #include "rgss_lib.h"
 
+#ifndef APP_VERSION
+    #define APP_VERSION "1.1"
+#endif
+
 #define MAX_PATH_LEN 4096
 
 static bool join_paths(char* dst, size_t dst_size, const char* a, const char* b) {
@@ -210,10 +214,15 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
     size_t file_count = archive->file_count;
     int digits = (file_count > 0) ? (int)floor(log10((double)file_count) + 1) : 1;
 
-    printf("%s------%s\n", g_colors.muted, g_colors.reset);
-    printf("%s%zu%s Files Found\n", g_colors.bold, file_count, g_colors.reset);
-    printf("Output Folder: %s%s%s\n", g_colors.dir, out_dir, g_colors.reset);
-    printf("%s------%s\n", g_colors.muted, g_colors.reset);
+    printf("%s----------------------------------------%s\n", g_colors.muted, g_colors.reset);
+    printf("%sExtract%s %s%zu%s files %s(RGSS v%d)%s\n",
+           g_colors.bold, g_colors.reset,
+           g_colors.ok, file_count, g_colors.reset,
+           g_colors.muted, archive->version, g_colors.reset);
+    printf("%sOutput%s  %s%s%s\n",
+           g_colors.bold, g_colors.reset,
+           g_colors.dir, out_dir, g_colors.reset);
+    printf("%s----------------------------------------%s\n", g_colors.muted, g_colors.reset);
 
     for (size_t i = 0; i < file_count; i++) {
         const RgssFilePointer* ptr = &archive->files[i];
@@ -259,11 +268,18 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
     return true;
 }
 
+static void print_version(void) {
+    printf("%srgssdecrypter%s %sv%s%s %s(C11 Native RGSS1/2/3 Tool)%s\n",
+           g_colors.bold, g_colors.reset,
+           g_colors.ok, APP_VERSION, g_colors.reset,
+           g_colors.muted, g_colors.reset);
+}
+
 static void print_usage(const char* prog_name) {
     printf("%sUsage:%s\n", g_colors.bold, g_colors.reset);
-    printf("  %s%s%s [%soptions%s] %s<archive.rgssad|rgss2a|rgss3a>%s\n",
+    printf("  %s%s%s %s[options]%s %s<archive.rgssad|rgss2a|rgss3a>%s\n",
            g_colors.file, prog_name, g_colors.reset,
-           g_colors.ok, g_colors.reset,
+           g_colors.muted, g_colors.reset,
            g_colors.accent, g_colors.reset);
     printf("  %s%s%s %s--pack%s %s<source_dir> <output.rgssad|rgss2a|rgss3a>%s\n\n",
            g_colors.file, prog_name, g_colors.reset,
@@ -292,6 +308,8 @@ static void print_usage(const char* prog_name) {
            g_colors.ok, g_colors.reset);
 
     printf("%sGeneral:%s\n", g_colors.bold, g_colors.reset);
+    printf("  %s-v, --version%s         Show version information\n",
+           g_colors.ok, g_colors.reset);
     printf("  %s-h, --help%s            Show this help message\n",
            g_colors.ok, g_colors.reset);
 }
@@ -312,6 +330,9 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            print_version();
             return 0;
         } else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--info") == 0) {
             args.info_dump = true;

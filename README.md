@@ -9,6 +9,7 @@ Standalone, zero-dependency C11 Command-Line RGSS<sup>1</sup> Decryptor & Packer
 * Built-in path-traversal protection and truncated-file verification
 * Optional RPG Maker project file generation (`Game.rxproj`, `Game.rvproj`, `Game.rvproj2`)
 * Info Dump Only Mode (no extraction)
+* Dark-terminal friendly ANSI color output with automatic TTY & `NO_COLOR` detection
 
 <sub><sup>1: RPG Maker XP/VX/VXAce Archives</sup></sub>
 
@@ -34,12 +35,18 @@ rgssdecrypter --repack <Folder> <OutputArchive>
 | Short | Full | Description |
 |-------|------|-------------|
 | `-h` | `--help` | Displays Help Message |
+| `-v` | `--version` | Displays Version Information (`v1.1`) |
 | `-i` | `--info` | Dumps Archive Information Only |
 | `-o` | `--output <dir>` | Output Directory (defaults to the archive's directory) |
 | `-p` | `--project` | Creates RPG Maker Project File (`Game.rxproj`/`rvproj`/`rvproj2`) |
 | `-s` | `--suppress` | Suppresses per-file extraction/packing output |
 | — | `--pack <dir> <out>` | Packs an extracted directory into `.rgssad`, `.rgss2a`, or `.rgss3a` |
 | — | `--repack <dir> <out>` | Alias for `--pack` |
+
+### **Environment Variables**
+---
+
+* **`NO_COLOR`**: Set to any non-empty value (e.g., `NO_COLOR=1`) to disable ANSI color output. Color codes are also automatically disabled when stdout/stderr is piped or redirected to a file, or when `TERM=dumb`.
 
 ### **Examples**
 ---
@@ -101,13 +108,15 @@ make install
 make
 ```
 
-#### Debug Build (AddressSanitizer & UBSan)
+#### Custom Version Override & Debug Build (AddressSanitizer & UBSan)
 ```bash
+make VERSION=1.2
 make debug
 ```
 
 ### **Changelog (From Original C# Release)**
 ---
+* **v1.1 — Terminal UI & CLI Polish:** Added dark-theme friendly ANSI color output across info tables, help screens, and extraction/packing banners; added automatic TTY and `NO_COLOR` detection; added `-v` / `--version` flag and `Makefile` `VERSION` macro injection.
 * **Rewritten in C11:** Removed all .NET / Mono dependencies for fast, small, stripped native binaries.
 * **Cross-Platform Path Normalization:** Automatically converts internal Windows `\` separators to OS-native separators during extraction and back to `\` during repacking.
 * **Security & Integrity Checks:** Blocks path-traversal entries (`..`, leading slashes, drive prefixes), enforces strict path length bounds, and fails with exit code `1` on incomplete/truncated files.
