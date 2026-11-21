@@ -54,13 +54,28 @@ jobs:
             mingw-w64-x86_64-gcc
             make
 
+      - name: Resolve build version
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            # Falls back to Makefile's default VERSION (1.1) on branch/PR builds
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build standard binary
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             export PATH="/mingw64/bin:/usr/bin:$PATH"
           fi
-          make
+          if [ -n "${{ steps.meta.outputs.version }}" ]; then
+            make VERSION="${{ steps.meta.outputs.version }}"
+          else
+            make
+          fi
           mv "rgssdecrypter${{ matrix.ext }}" "${{ matrix.artifact_name }}"
 
       - name: Build static binary
@@ -71,10 +86,14 @@ jobs:
             export PATH="/mingw64/bin:/usr/bin:$PATH"
           fi
           make clean
-          make LDFLAGS="-lm -static"
+          if [ -n "${{ steps.meta.outputs.version }}" ]; then
+            make VERSION="${{ steps.meta.outputs.version }}" LDFLAGS="-lm -static"
+          else
+            make LDFLAGS="-lm -static"
+          fi
           mv "rgssdecrypter${{ matrix.ext }}" "${{ matrix.static_artifact_name }}"
 
-      - name: Run round-trip pack/unpack test
+      - name: Run round-trip pack/unpack & CLI test
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -85,6 +104,18 @@ jobs:
             local bin="$1"
             echo "Testing $bin..."
             "./$bin" --help
+            "./$bin" --version
+
+            # Verify redirected (non-TTY) output contains no raw ANSI escape sequences
+            if "./$bin" --version | grep -q $'\x1b'; then
+              echo "Error: ANSI escape codes leaked into non-TTY stdout!"
+              exit 1
+            fi
+
+            # Verify tag version matches --version output on tagged releases
+            if [ -n "${{ steps.meta.outputs.version }}" ]; then
+              "./$bin" --version | grep -q "v${{ steps.meta.outputs.version }}"
+            fi
 
             rm -rf test_in test_out test_game.rgss3a
             mkdir -p test_in/Data
