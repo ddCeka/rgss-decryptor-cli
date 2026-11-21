@@ -294,12 +294,14 @@ static void print_usage(const char* prog_name) {
     printf("  %s [options] <archive.rgssad|rgss2a|rgss3a>\n", prog_name);
     printf("  %s --pack <source_dir> <output.rgssad|rgss2a|rgss3a>\n\n", prog_name);
     printf("Unpack Options:\n");
-    printf("  -o, --output <dir>    Output directory relative to archive (default: archive dir)\n");
+    printf("  -o, --output <dir>    Output directory relative to archive\n");
+    printf("                        (default: archive dir)\n");
     printf("  -i, --info            Dump archive file table without extracting\n");
     printf("  -s, --suppress        Suppress per-file output\n");
-    printf("  -p, --project         Generate RPG Maker project file (Game.rxproj/rvproj/rvproj2)\n\n");
+    printf("  -p, --project         Generate RPG Maker project file\n");
+    printf("                        (Game.rxproj/rvproj/rvproj2)\n\n");
     printf("Repack Options:\n");
-    printf("  --pack   <dir>        Pack directory into specified RGSS archive\n\n");
+    printf("  --pack   <dir>        Pack directory into specified RGSS archive\n");
     printf("  --repack <dir>        An alias of --pack command option\n\n");
     printf("General:\n");
     printf("  -h, --help            Show this help message\n");
