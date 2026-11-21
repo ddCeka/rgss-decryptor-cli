@@ -260,21 +260,40 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
 }
 
 static void print_usage(const char* prog_name) {
-    printf("Usage:\n");
-    printf("  %s [options] <archive.rgssad|rgss2a|rgss3a>\n", prog_name);
-    printf("  %s --pack <source_dir> <output.rgssad|rgss2a|rgss3a>\n\n", prog_name);
-    printf("Unpack Options:\n");
-    printf("  -o, --output <dir>    Output directory relative to archive\n");
-    printf("                        (default: archive dir)\n");
-    printf("  -i, --info            Dump archive file table without extracting\n");
-    printf("  -s, --suppress        Suppress per-file output\n");
-    printf("  -p, --project         Generate RPG Maker project file\n");
-    printf("                        (Game.rxproj/rvproj/rvproj2)\n\n");
-    printf("Repack Options:\n");
-    printf("  --pack   <dir>        Pack directory into specified RGSS archive\n");
-    printf("  --repack <dir>        An alias of --pack command option\n\n");
-    printf("General:\n");
-    printf("  -h, --help            Show this help message\n");
+    printf("%sUsage:%s\n", g_colors.bold, g_colors.reset);
+    printf("  %s%s%s [%soptions%s] %s<archive.rgssad|rgss2a|rgss3a>%s\n",
+           g_colors.file, prog_name, g_colors.reset,
+           g_colors.ok, g_colors.reset,
+           g_colors.accent, g_colors.reset);
+    printf("  %s%s%s %s--pack%s %s<source_dir> <output.rgssad|rgss2a|rgss3a>%s\n\n",
+           g_colors.file, prog_name, g_colors.reset,
+           g_colors.ok, g_colors.reset,
+           g_colors.accent, g_colors.reset);
+
+    printf("%sUnpack Options:%s\n", g_colors.bold, g_colors.reset);
+    printf("  %s-o, --output%s %s<dir>%s    Output directory relative to archive\n",
+           g_colors.ok, g_colors.reset, g_colors.accent, g_colors.reset);
+    printf("                        %s(default: archive dir)%s\n",
+           g_colors.muted, g_colors.reset);
+    printf("  %s-i, --info%s            Dump archive file table without extracting\n",
+           g_colors.ok, g_colors.reset);
+    printf("  %s-s, --suppress%s        Suppress per-file output\n",
+           g_colors.ok, g_colors.reset);
+    printf("  %s-p, --project%s         Generate RPG Maker project file\n",
+           g_colors.ok, g_colors.reset);
+    printf("                        %s(Game.rxproj/rvproj/rvproj2)%s\n\n",
+           g_colors.muted, g_colors.reset);
+
+    printf("%sRepack Options:%s\n", g_colors.bold, g_colors.reset);
+    printf("  %s--pack%s   %s<dir>%s        Pack directory into specified RGSS archive\n",
+           g_colors.ok, g_colors.reset, g_colors.accent, g_colors.reset);
+    printf("  %s--repack%s %s<dir>%s        An alias of %s--pack%s command option\n\n",
+           g_colors.ok, g_colors.reset, g_colors.accent, g_colors.reset,
+           g_colors.ok, g_colors.reset);
+
+    printf("%sGeneral:%s\n", g_colors.bold, g_colors.reset);
+    printf("  %s-h, --help%s            Show this help message\n",
+           g_colors.ok, g_colors.reset);
 }
 
 int main(int argc, char* argv[]) {
@@ -310,7 +329,7 @@ int main(int argc, char* argv[]) {
         } else {
             fprintf(stderr, "%sUnknown or incomplete option: %s%s\n",
                     g_colors.err_stderr, argv[i], g_colors.reset_stderr);
-            print_usage(argv);
+            print_usage(argv[0]);
             return 1;
         }
     }
@@ -326,7 +345,7 @@ int main(int argc, char* argv[]) {
         if (!args.pack_source_dir || !args.rgss_archive) {
             fprintf(stderr, "%sError: --pack/--repack requires both <source_dir> and <output_archive>.%s\n",
                     g_colors.err_stderr, g_colors.reset_stderr);
-            print_usage(argv);
+            print_usage(argv[0]);
             return 1;
         }
         if (!rgss_archive_pack(args.pack_source_dir, args.rgss_archive, args.suppress_output,
@@ -339,7 +358,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (!args.rgss_archive || args.rgss_archive[0] == '\0') {
-        print_usage(argv);
+        print_usage(argv[0]);
         return 1;
     }
 
