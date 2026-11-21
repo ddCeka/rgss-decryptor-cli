@@ -10,12 +10,10 @@
 
 #ifdef _WIN32
     #include <windows.h>
-    #include <sys/stat.h>
     #define PATH_SEP '\\'
 #else
     #include <dirent.h>
     #include <sys/stat.h>
-    #include <sys/types.h>
     #include <unistd.h>
     #define PATH_SEP '/'
 #endif
@@ -26,7 +24,43 @@
 #define IO_BUFFER_SIZE (16 * 1024)
 #define MAX_PACK_PATH 4096
 
-// Little-endian safe readers & writers
+static bool join_paths(char* dst, size_t dst_size, const char* dir, const char* leaf) {
+    size_t dlen = strlen(dir);
+    size_t llen = strlen(leaf);
+
+    while (dlen > 0 && (dir[dlen - 1] == '/' || dir[dlen - 1] == '\\')) {
+        dlen--;
+    }
+
+    if (dlen + 1 + llen + 1 > dst_size) {
+        return false;
+    }
+
+    memcpy(dst, dir, dlen);
+    dst[dlen] = PATH_SEP;
+    memcpy(dst + dlen + 1, leaf, llen);
+    dst[dlen + 1 + llen] = '\0';
+    return true;
+}
+
+static bool join_archive_rel(char* dst, size_t dst_size, const char* dir, const char* leaf) {
+    if (!dir || dir[0] == '\0') {
+        size_t llen = strlen(leaf);
+        if (llen + 1 > dst_size) return false;
+        memcpy(dst, leaf, llen + 1);
+        return true;
+    }
+    size_t dlen = strlen(dir);
+    size_t llen = strlen(leaf);
+    if (dlen + 1 + llen + 1 > dst_size) return false;
+
+    memcpy(dst, dir, dlen);
+    dst[dlen] = '\\';
+    memcpy(dst + dlen + 1, leaf, llen);
+    dst[dlen + 1 + llen] = '\0';
+    return true;
+}
+
 static bool read_u32_le(FILE* f, uint32_t* out) {
     uint8_t b[4];
     if (fread(b, 1, 4, f) != 4) return false;
@@ -55,7 +89,6 @@ static bool write_u8(FILE* f, uint8_t val) {
     return fwrite(&val, 1, 1, f) == 1;
 }
 
-// Portable cross-platform 64-bit file seek/tell
 static bool seek_u64(FILE* f, uint64_t offset, int origin) {
 #ifdef _WIN32
     return _fseeki64(f, (__int64)offset, origin) == 0;
@@ -74,7 +107,6 @@ static uint64_t tell_u64(FILE* f) {
 #endif
 }
 
-// Equivalent to RgssDecryptionKey(7, 3) LCG step: key = key * 7 + 3
 static inline uint32_t step_key(uint32_t* key) {
     uint32_t current = *key;
     *key = (*key * 7u) + 3u;
@@ -155,15 +187,15 @@ static bool parse_v1(RgssArchive* archive, FILE* f, uint64_t file_size, char* er
 
         uint32_t data_size = 0;
         if (!read_u32_le(f, &data_size)) {
+            snprintf(err_msg, err_size, "Unexpected EOF reading entry size for %.256s", name);
             free(name);
-            snprintf(err_msg, err_size, "Unexpected EOF reading entry size for %s", name);
             return false;
         }
         data_size ^= step_key(&key);
 
         uint64_t data_offset = tell_u64(f);
         if (data_offset + data_size > file_size) {
-            snprintf(err_msg, err_size, "Entry %s exceeds archive bounds", name);
+            snprintf(err_msg, err_size, "Entry %.256s exceeds archive bounds", name);
             free(name);
             return false;
         }
@@ -182,7 +214,7 @@ static bool parse_v1(RgssArchive* archive, FILE* f, uint64_t file_size, char* er
         }
 
         if (!seek_u64(f, data_offset + data_size, SEEK_SET)) {
-            snprintf(err_msg, err_size, "Failed to seek past entry %s", name);
+            snprintf(err_msg, err_size, "Failed to seek past entry %.256s", name);
             return false;
         }
     }
@@ -242,7 +274,7 @@ static bool parse_v3(RgssArchive* archive, FILE* f, uint64_t file_size, char* er
         name[name_len] = '\0';
 
         if ((uint64_t)offset + (uint64_t)size > file_size) {
-            snprintf(err_msg, err_size, "Entry %s exceeds archive bounds", name);
+            snprintf(err_msg, err_size, "Entry %.256s exceeds archive bounds", name);
             free(name);
             return false;
         }
@@ -275,7 +307,7 @@ bool rgss_archive_open(RgssArchive* archive, const char* path, int version, char
 
     FILE* f = fopen(path, "rb");
     if (!f) {
-        snprintf(err_msg, err_size, "Cannot open file: %s", strerror(errno));
+        snprintf(err_msg, err_size, "Cannot open file: %.256s", strerror(errno));
         rgss_archive_free(archive);
         return false;
     }
@@ -311,16 +343,16 @@ bool rgss_archive_open(RgssArchive* archive, const char* path, int version, char
     return ok;
 }
 
-static bool xor_copy_stream(FILE* in, FILE* out, uint32_t size, uint32_t initial_key,
-                            size_t* out_processed, char* err_msg, size_t err_size, const char* label) {
+static bool write_encrypted_stream(FILE* in, FILE* out, uint32_t initial_key, uint32_t expected_size,
+                                   size_t* out_written, char* err_msg, size_t err_size) {
     uint8_t buffer[IO_BUFFER_SIZE];
     uint32_t key = initial_key;
     uint32_t current_mask = step_key(&key);
     int byte_lane = 0;
     size_t total = 0;
 
-    while (total < size) {
-        size_t remaining = (size_t)size - total;
+    while (total < expected_size) {
+        size_t remaining = (size_t)expected_size - total;
         size_t to_read = (remaining < sizeof(buffer)) ? remaining : sizeof(buffer);
         size_t n = fread(buffer, 1, to_read, in);
 
@@ -338,16 +370,14 @@ static bool xor_copy_stream(FILE* in, FILE* out, uint32_t size, uint32_t initial
         }
 
         if (fwrite(buffer, 1, n, out) != n) {
-            snprintf(err_msg, err_size, "Write error on %s: %s", label, strerror(errno));
+            snprintf(err_msg, err_size, "Write error: %.256s", strerror(errno));
             return false;
         }
 
         total += n;
     }
 
-    if (out_processed) {
-        *out_processed = total;
-    }
+    if (out_written) *out_written = total;
     return true;
 }
 
@@ -355,33 +385,35 @@ bool rgss_extract_file_to_disk(const RgssArchive* archive, const RgssFilePointer
                                const char* target_path, char* err_msg, size_t err_size) {
     FILE* in = fopen(archive->data_path, "rb");
     if (!in) {
-        snprintf(err_msg, err_size, "Failed to open archive: %s", strerror(errno));
+        snprintf(err_msg, err_size, "Failed to open archive: %.256s", strerror(errno));
         return false;
     }
 
     if (!seek_u64(in, fp->offset, SEEK_SET)) {
         fclose(in);
-        snprintf(err_msg, err_size, "Failed to seek to %s", fp->name);
+        snprintf(err_msg, err_size, "Failed to seek to %.256s", fp->name);
         return false;
     }
 
     FILE* out = fopen(target_path, "wb");
     if (!out) {
         fclose(in);
-        snprintf(err_msg, err_size, "Failed to create %s: %s", target_path, strerror(errno));
+        snprintf(err_msg, err_size, "Failed to create %.256s: %.128s", target_path, strerror(errno));
         return false;
     }
 
     size_t total_read = 0;
-    bool ok = xor_copy_stream(in, out, fp->size, fp->key, &total_read, err_msg, err_size, target_path);
+    bool ok = write_encrypted_stream(in, out, fp->key, fp->size, &total_read, err_msg, err_size);
 
     fclose(in);
     fclose(out);
 
-    if (!ok) return false;
+    if (!ok) {
+        return false;
+    }
 
     if (total_read < fp->size) {
-        snprintf(err_msg, err_size, "Incomplete file %s (%zu/%u bytes)",
+        snprintf(err_msg, err_size, "Incomplete file %.256s (%zu/%u bytes)",
                  fp->name, total_read, fp->size);
         return false;
     }
@@ -389,16 +421,14 @@ bool rgss_extract_file_to_disk(const RgssArchive* archive, const RgssFilePointer
     return true;
 }
 
-// ============================================================================
-// Archive Packing (rgss_archive_pack)
-// ============================================================================
+// --- Archive Repacking Implementation ---
 
 typedef struct {
     char* disk_path;
-    char* archive_name; // Uses '\' separators for RGSS compatibility
+    char* archive_name;
     uint32_t size;
     uint32_t key;
-    uint64_t offset;
+    uint32_t offset;
 } PackEntry;
 
 typedef struct {
@@ -417,7 +447,7 @@ static void pack_list_free(PackList* list) {
     memset(list, 0, sizeof(*list));
 }
 
-static bool pack_list_add(PackList* list, const char* disk_path, const char* rel_path, uint32_t size) {
+static bool pack_list_add(PackList* list, PackEntry entry) {
     if (list->count >= list->capacity) {
         size_t new_cap = (list->capacity == 0) ? 64 : list->capacity * 2;
         PackEntry* resized = (PackEntry*)realloc(list->items, new_cap * sizeof(PackEntry));
@@ -425,27 +455,6 @@ static bool pack_list_add(PackList* list, const char* disk_path, const char* rel
         list->items = resized;
         list->capacity = new_cap;
     }
-
-    char* d_copy = duplicate_string(disk_path);
-    char* a_copy = duplicate_string(rel_path);
-    if (!d_copy || !a_copy) {
-        free(d_copy);
-        free(a_copy);
-        return false;
-    }
-
-    // RPG Maker expects Windows backslashes inside the archive table
-    for (char* p = a_copy; *p; p++) {
-        if (*p == '/') *p = '\\';
-    }
-
-    PackEntry entry = {
-        .disk_path = d_copy,
-        .archive_name = a_copy,
-        .size = size,
-        .key = 0,
-        .offset = 0
-    };
     list->items[list->count++] = entry;
     return true;
 }
@@ -456,122 +465,127 @@ static int compare_pack_entries(const void* a, const void* b) {
     return strcmp(ea->archive_name, eb->archive_name);
 }
 
-static bool should_skip_entry(const char* name, const char* out_basename) {
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return true;
-    // Skip hidden dotfiles (e.g. .git, .DS_Store)
+static bool is_excluded_file(const char* name, const char* out_basename) {
     if (name[0] == '.') return true;
-    // Skip RPG Maker editor project files
+    if (out_basename && strcmp(name, out_basename) == 0) return true;
     if (strcmp(name, "Game.rxproj") == 0 ||
         strcmp(name, "Game.rvproj") == 0 ||
         strcmp(name, "Game.rvproj2") == 0) {
         return true;
     }
-    // Skip output archive if placed in the root of the packed directory
-    if (out_basename && strcmp(name, out_basename) == 0) return true;
     return false;
 }
 
-static bool scan_directory_recursive(const char* base_dir, const char* rel_prefix,
-                                     const char* out_basename, PackList* list,
-                                     char* err_msg, size_t err_size) {
-    char current_dir[MAX_PACK_PATH];
-    if (rel_prefix[0] == '\0') {
-        snprintf(current_dir, sizeof(current_dir), "%s", base_dir);
-    } else {
-        snprintf(current_dir, sizeof(current_dir), "%s%c%s", base_dir, PATH_SEP, rel_prefix);
+static bool collect_files_recursive(const char* base_disk_dir, const char* rel_archive_dir,
+                                    const char* out_basename, PackList* list,
+                                    char* err_msg, size_t err_size) {
+#ifdef _WIN32
+    char search_path[MAX_PACK_PATH];
+    if (!join_paths(search_path, sizeof(search_path), base_disk_dir, "*")) {
+        snprintf(err_msg, err_size, "Directory path too long");
+        return false;
     }
 
-#ifdef _WIN32
-    char search_pattern[MAX_PACK_PATH];
-    snprintf(search_pattern, sizeof(search_pattern), "%s\\*", current_dir);
-
-    WIN32_FIND_DATAA ffd;
-    HANDLE hFind = FindFirstFileA(search_pattern, &ffd);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(search_path, &fd);
     if (hFind == INVALID_HANDLE_VALUE) {
-        snprintf(err_msg, err_size, "Cannot open directory %s", current_dir);
+        snprintf(err_msg, err_size, "Cannot open directory: %.256s", base_disk_dir);
         return false;
     }
 
     do {
-        if (should_skip_entry(ffd.cFileName, rel_prefix[0] == '\0' ? out_basename : NULL)) {
-            continue;
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (is_excluded_file(fd.cFileName, out_basename)) continue;
+
+        char child_disk[MAX_PACK_PATH];
+        char child_arch[MAX_PACK_PATH];
+        if (!join_paths(child_disk, sizeof(child_disk), base_disk_dir, fd.cFileName) ||
+            !join_archive_rel(child_arch, sizeof(child_arch), rel_archive_dir, fd.cFileName)) {
+            FindClose(hFind);
+            snprintf(err_msg, err_size, "Path exceeds maximum length");
+            return false;
         }
 
-        char next_rel[MAX_PACK_PATH];
-        if (rel_prefix[0] == '\0') {
-            snprintf(next_rel, sizeof(next_rel), "%s", ffd.cFileName);
-        } else {
-            snprintf(next_rel, sizeof(next_rel), "%s/%s", rel_prefix, ffd.cFileName);
-        }
-
-        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!scan_directory_recursive(base_dir, next_rel, out_basename, list, err_msg, err_size)) {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!collect_files_recursive(child_disk, child_arch, out_basename, list, err_msg, err_size)) {
                 FindClose(hFind);
                 return false;
             }
         } else {
-            uint64_t fsize = ((uint64_t)ffd.nFileSizeHigh << 32) | (uint64_t)ffd.nFileSizeLow;
+            uint64_t fsize = ((uint64_t)fd.nFileSizeHigh << 32) | (uint64_t)fd.nFileSizeLow;
             if (fsize > UINT32_MAX) {
                 FindClose(hFind);
-                snprintf(err_msg, err_size, "File %s exceeds 4GB RGSS limit", next_rel);
+                snprintf(err_msg, err_size, "File exceeds 4GB RGSS limit: %.256s", child_arch);
                 return false;
             }
-
-            char full_disk[MAX_PACK_PATH];
-            snprintf(full_disk, sizeof(full_disk), "%s\\%s", current_dir, ffd.cFileName);
-
-            if (!pack_list_add(list, full_disk, next_rel, (uint32_t)fsize)) {
+            PackEntry entry = {
+                .disk_path = duplicate_string(child_disk),
+                .archive_name = duplicate_string(child_arch),
+                .size = (uint32_t)fsize,
+                .key = 0,
+                .offset = 0
+            };
+            if (!entry.disk_path || !entry.archive_name || !pack_list_add(list, entry)) {
+                free(entry.disk_path);
+                free(entry.archive_name);
                 FindClose(hFind);
                 snprintf(err_msg, err_size, "Out of memory");
                 return false;
             }
         }
-    } while (FindNextFileA(hFind, &ffd) != 0);
+    } while (FindNextFileA(hFind, &fd));
 
     FindClose(hFind);
     return true;
 #else
-    DIR* dir = opendir(current_dir);
+    DIR* dir = opendir(base_disk_dir);
     if (!dir) {
-        snprintf(err_msg, err_size, "Cannot open directory %s: %s", current_dir, strerror(errno));
+        snprintf(err_msg, err_size, "Cannot open directory %.256s: %.128s", base_disk_dir, strerror(errno));
         return false;
     }
 
     struct dirent* ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (should_skip_entry(ent->d_name, rel_prefix[0] == '\0' ? out_basename : NULL)) {
-            continue;
-        }
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (is_excluded_file(ent->d_name, out_basename)) continue;
 
-        char full_disk[MAX_PACK_PATH];
-        snprintf(full_disk, sizeof(full_disk), "%s/%s", current_dir, ent->d_name);
-
-        char next_rel[MAX_PACK_PATH];
-        if (rel_prefix[0] == '\0') {
-            snprintf(next_rel, sizeof(next_rel), "%s", ent->d_name);
-        } else {
-            snprintf(next_rel, sizeof(next_rel), "%s/%s", rel_prefix, ent->d_name);
+        char child_disk[MAX_PACK_PATH];
+        char child_arch[MAX_PACK_PATH];
+        if (!join_paths(child_disk, sizeof(child_disk), base_disk_dir, ent->d_name) ||
+            !join_archive_rel(child_arch, sizeof(child_arch), rel_archive_dir, ent->d_name)) {
+            closedir(dir);
+            snprintf(err_msg, err_size, "Path exceeds maximum length");
+            return false;
         }
 
         struct stat st;
-        if (stat(full_disk, &st) != 0) {
+        if (stat(child_disk, &st) != 0) {
             closedir(dir);
-            snprintf(err_msg, err_size, "Cannot stat %s: %s", full_disk, strerror(errno));
+            snprintf(err_msg, err_size, "Cannot stat %.256s: %.128s", child_disk, strerror(errno));
             return false;
         }
 
         if (S_ISDIR(st.st_mode)) {
-            if (!scan_directory_recursive(base_dir, next_rel, out_basename, list, err_msg, err_size)) {
+            if (!collect_files_recursive(child_disk, child_arch, out_basename, list, err_msg, err_size)) {
                 closedir(dir);
                 return false;
             }
         } else if (S_ISREG(st.st_mode)) {
             if ((uint64_t)st.st_size > UINT32_MAX) {
                 closedir(dir);
-                snprintf(err_msg, err_size, "File %s exceeds 4GB RGSS limit", next_rel);
+                snprintf(err_msg, err_size, "File exceeds 4GB RGSS limit: %.256s", child_arch);
                 return false;
             }
-            if (!pack_list_add(list, full_disk, next_rel, (uint32_t)st.st_size)) {
+            PackEntry entry = {
+                .disk_path = duplicate_string(child_disk),
+                .archive_name = duplicate_string(child_arch),
+                .size = (uint32_t)st.st_size,
+                .key = 0,
+                .offset = 0
+            };
+            if (!entry.disk_path || !entry.archive_name || !pack_list_add(list, entry)) {
+                free(entry.disk_path);
+                free(entry.archive_name);
                 closedir(dir);
                 snprintf(err_msg, err_size, "Out of memory");
                 return false;
@@ -584,8 +598,8 @@ static bool scan_directory_recursive(const char* base_dir, const char* rel_prefi
 #endif
 }
 
-static int detect_pack_version(const char* output_archive) {
-    const char* dot = strrchr(output_archive, '.');
+static int detect_target_version(const char* out_archive) {
+    const char* dot = strrchr(out_archive, '.');
     if (!dot) return -1;
 
     char ext[16] = {0};
@@ -598,50 +612,49 @@ static int detect_pack_version(const char* output_archive) {
     return -1;
 }
 
-static bool pack_write_v1(FILE* out, PackList* list, bool suppress_output, char* err_msg, size_t err_size) {
+static bool write_pack_v1(FILE* out, PackList* list, bool suppress, char* err_msg, size_t err_size) {
     uint32_t key = RGSS_V1_INITIAL_KEY;
 
     for (size_t i = 0; i < list->count; i++) {
-        PackEntry* entry = &list->items[i];
-        uint32_t name_len = (uint32_t)strlen(entry->archive_name);
+        PackEntry* e = &list->items[i];
+        uint32_t name_len = (uint32_t)strlen(e->archive_name);
 
-        if (!suppress_output) {
-            printf("[32m[%zu/%zu] Pack:[37m %s[0m[39m\n",
-                   i + 1, list->count, entry->archive_name);
+        if (!suppress) {
+            printf("\x1B[32m[%zu/%zu] Packing  :\x1B[37m %s\x1B[0m\x1B[39m\n",
+                   i + 1, list->count, e->archive_name);
         }
 
         if (!write_u32_le(out, name_len ^ step_key(&key))) {
-            snprintf(err_msg, err_size, "Write error on header for %s", entry->archive_name);
+            snprintf(err_msg, err_size, "Failed writing entry header");
             return false;
         }
 
         for (uint32_t j = 0; j < name_len; j++) {
-            uint8_t enc = (uint8_t)entry->archive_name[j] ^ (uint8_t)(step_key(&key) & 0xFFu);
-            if (!write_u8(out, enc)) {
-                snprintf(err_msg, err_size, "Write error on filename %s", entry->archive_name);
+            uint32_t k = step_key(&key);
+            uint8_t enc_ch = (uint8_t)e->archive_name[j] ^ (uint8_t)(k & 0xFFu);
+            if (!write_u8(out, enc_ch)) {
+                snprintf(err_msg, err_size, "Failed writing entry filename");
                 return false;
             }
         }
 
-        if (!write_u32_le(out, entry->size ^ step_key(&key))) {
-            snprintf(err_msg, err_size, "Write error on size for %s", entry->archive_name);
+        if (!write_u32_le(out, e->size ^ step_key(&key))) {
+            snprintf(err_msg, err_size, "Failed writing entry size");
             return false;
         }
 
-        FILE* in = fopen(entry->disk_path, "rb");
+        FILE* in = fopen(e->disk_path, "rb");
         if (!in) {
-            snprintf(err_msg, err_size, "Cannot open %s: %s", entry->disk_path, strerror(errno));
+            snprintf(err_msg, err_size, "Cannot open %.256s: %.128s", e->disk_path, strerror(errno));
             return false;
         }
 
         size_t written = 0;
-        bool ok = xor_copy_stream(in, out, entry->size, key, &written, err_msg, err_size, entry->archive_name);
+        bool ok = write_encrypted_stream(in, out, key, e->size, &written, err_msg, err_size);
         fclose(in);
 
-        if (!ok) return false;
-        if (written < entry->size) {
-            snprintf(err_msg, err_size, "Short read packing %s (%zu/%u bytes)",
-                     entry->disk_path, written, entry->size);
+        if (!ok || written < e->size) {
+            if (ok) snprintf(err_msg, err_size, "Short read on %.256s", e->disk_path);
             return false;
         }
     }
@@ -649,92 +662,86 @@ static bool pack_write_v1(FILE* out, PackList* list, bool suppress_output, char*
     return true;
 }
 
-static bool pack_write_v3(FILE* out, PackList* list, bool suppress_output, char* err_msg, size_t err_size) {
+static bool write_pack_v3(FILE* out, PackList* list, bool suppress, char* err_msg, size_t err_size) {
     srand((unsigned int)time(NULL));
-    uint32_t seed = ((uint32_t)(rand() & 0xFFFF) << 16) | (uint32_t)(rand() & 0xFFFF);
-    if (seed == 0) seed = 0x12345678u;
+    uint32_t raw_seed = ((uint32_t)rand() << 16) ^ (uint32_t)rand() ^ 0x13579BDFu;
+    if (raw_seed == 0) raw_seed = 0x2468ACE0u;
+    uint32_t base_key = (raw_seed * 9u) + 3u;
 
-    if (!write_u32_le(out, seed)) {
-        snprintf(err_msg, err_size, "Failed to write RGSS3 seed");
+    if (!write_u32_le(out, raw_seed)) {
+        snprintf(err_msg, err_size, "Failed writing RGSS3 seed");
         return false;
     }
 
-    uint32_t base_key = (seed * 9u) + 3u;
-
-    // Calculate file table byte size:
-    // 8 (header) + 4 (seed) + sum(16 + name_len) + 16 (null terminator entry)
-    uint64_t data_offset = 12;
+    // Calculate exact file table size:
+    // 8-byte header + 4-byte seed + sum(16 + name_len) + 16-byte null terminator
+    uint64_t data_cursor = 8 + 4 + 16;
     for (size_t i = 0; i < list->count; i++) {
-        data_offset += 16 + strlen(list->items[i].archive_name);
+        data_cursor += 16 + strlen(list->items[i].archive_name);
     }
-    data_offset += 16; // Null terminator entry
 
-    // Assign offsets and per-file keys, then write encrypted file table
+    if (data_cursor > UINT32_MAX) {
+        snprintf(err_msg, err_size, "Archive file table exceeds 4GB RGSS3 offset limit");
+        return false;
+    }
+
     for (size_t i = 0; i < list->count; i++) {
-        PackEntry* entry = &list->items[i];
-        uint32_t name_len = (uint32_t)strlen(entry->archive_name);
-
-        if (data_offset > UINT32_MAX) {
+        PackEntry* e = &list->items[i];
+        if (data_cursor > UINT32_MAX) {
             snprintf(err_msg, err_size, "Archive exceeds 4GB RGSS3 offset limit");
             return false;
         }
+        e->offset = (uint32_t)data_cursor;
+        e->key = (((uint32_t)rand() << 16) ^ (uint32_t)rand() ^ (uint32_t)(i + 1) * 0x9E3779B9u) | 1u;
+        data_cursor += e->size;
 
-        entry->offset = data_offset;
-        entry->key = ((uint32_t)(rand() & 0xFFFF) << 16) | (uint32_t)(rand() & 0xFFFF);
-        if (entry->key == 0) entry->key = 0xDEADBEEFu;
-
-        if (!write_u32_le(out, (uint32_t)entry->offset ^ base_key) ||
-            !write_u32_le(out, entry->size ^ base_key) ||
-            !write_u32_le(out, entry->key ^ base_key) ||
+        uint32_t name_len = (uint32_t)strlen(e->archive_name);
+        if (!write_u32_le(out, e->offset ^ base_key) ||
+            !write_u32_le(out, e->size ^ base_key) ||
+            !write_u32_le(out, e->key ^ base_key) ||
             !write_u32_le(out, name_len ^ base_key)) {
-            snprintf(err_msg, err_size, "Failed writing RGSS3 table entry for %s", entry->archive_name);
+            snprintf(err_msg, err_size, "Failed writing RGSS3 table entry");
             return false;
         }
 
         for (uint32_t j = 0; j < name_len; j++) {
             uint8_t key_byte = (uint8_t)((base_key >> ((j % 4) * 8)) & 0xFFu);
-            uint8_t enc = (uint8_t)entry->archive_name[j] ^ key_byte;
-            if (!write_u8(out, enc)) {
-                snprintf(err_msg, err_size, "Failed writing RGSS3 filename %s", entry->archive_name);
+            if (!write_u8(out, (uint8_t)e->archive_name[j] ^ key_byte)) {
+                snprintf(err_msg, err_size, "Failed writing RGSS3 entry name");
                 return false;
             }
         }
-
-        data_offset += entry->size;
     }
 
-    // Write null terminator table entry (decrypted offset == 0)
+    // Write table terminator (decrypted offset == 0)
     if (!write_u32_le(out, 0u ^ base_key) ||
-        !write_u32_le(out, 0u ^ base_key) ||
-        !write_u32_le(out, 0u ^ base_key) ||
-        !write_u32_le(out, 0u ^ base_key)) {
+        !write_u32_le(out, 0u) ||
+        !write_u32_le(out, 0u) ||
+        !write_u32_le(out, 0u)) {
         snprintf(err_msg, err_size, "Failed writing RGSS3 table terminator");
         return false;
     }
 
     // Write encrypted file payloads
     for (size_t i = 0; i < list->count; i++) {
-        PackEntry* entry = &list->items[i];
-
-        if (!suppress_output) {
-            printf("[32m[%zu/%zu] Pack:[37m %s[0m[39m\n",
-                   i + 1, list->count, entry->archive_name);
+        PackEntry* e = &list->items[i];
+        if (!suppress) {
+            printf("\x1B[32m[%zu/%zu] Packing  :\x1B[37m %s\x1B[0m\x1B[39m\n",
+                   i + 1, list->count, e->archive_name);
         }
 
-        FILE* in = fopen(entry->disk_path, "rb");
+        FILE* in = fopen(e->disk_path, "rb");
         if (!in) {
-            snprintf(err_msg, err_size, "Cannot open %s: %s", entry->disk_path, strerror(errno));
+            snprintf(err_msg, err_size, "Cannot open %.256s: %.128s", e->disk_path, strerror(errno));
             return false;
         }
 
         size_t written = 0;
-        bool ok = xor_copy_stream(in, out, entry->size, entry->key, &written, err_msg, err_size, entry->archive_name);
+        bool ok = write_encrypted_stream(in, out, e->key, e->size, &written, err_msg, err_size);
         fclose(in);
 
-        if (!ok) return false;
-        if (written < entry->size) {
-            snprintf(err_msg, err_size, "Short read packing %s (%zu/%u bytes)",
-                     entry->disk_path, written, entry->size);
+        if (!ok || written < e->size) {
+            if (ok) snprintf(err_msg, err_size, "Short read on %.256s", e->disk_path);
             return false;
         }
     }
@@ -742,28 +749,28 @@ static bool pack_write_v3(FILE* out, PackList* list, bool suppress_output, char*
     return true;
 }
 
-bool rgss_archive_pack(const char* input_dir, const char* output_archive,
-                       bool suppress_output, char* err_msg, size_t err_size) {
-    int version = detect_pack_version(output_archive);
+bool rgss_archive_pack(const char* source_dir, const char* out_archive, bool suppress,
+                       char* err_msg, size_t err_size) {
+    int version = detect_target_version(out_archive);
     if (version == -1) {
-        snprintf(err_msg, err_size, "Output filename must end in .rgssad, .rgss2a, or .rgss3a");
+        snprintf(err_msg, err_size, "Output extension must be .rgssad, .rgss2a, or .rgss3a");
         return false;
     }
 
-    const char* out_base = strrchr(output_archive, '/');
-    const char* out_bbase = strrchr(output_archive, '\\');
+    const char* out_base = strrchr(out_archive, '/');
+    const char* out_bbase = strrchr(out_archive, '\\');
     if (out_bbase && (!out_base || out_bbase > out_base)) out_base = out_bbase;
-    out_base = out_base ? (out_base + 1) : output_archive;
+    out_base = out_base ? (out_base + 1) : out_archive;
 
     PackList list = {0};
-    if (!scan_directory_recursive(input_dir, "", out_base, &list, err_msg, err_size)) {
+    if (!collect_files_recursive(source_dir, "", out_base, &list, err_msg, err_size)) {
         pack_list_free(&list);
         return false;
     }
 
     if (list.count == 0) {
         pack_list_free(&list);
-        snprintf(err_msg, err_size, "No files found to pack in %s", input_dir);
+        snprintf(err_msg, err_size, "No packable files found in %.256s", source_dir);
         return false;
     }
 
@@ -771,14 +778,13 @@ bool rgss_archive_pack(const char* input_dir, const char* output_archive,
 
     printf("------\n");
     printf("Packing %zu Files (RGSS v%d)\n", list.count, version);
-    printf("Source Folder : %s\n", input_dir);
-    printf("Output Archive: %s\n", output_archive);
+    printf("Output Archive: %s\n", out_archive);
     printf("------\n");
 
-    FILE* out = fopen(output_archive, "wb");
+    FILE* out = fopen(out_archive, "wb");
     if (!out) {
         pack_list_free(&list);
-        snprintf(err_msg, err_size, "Cannot create %s: %s", output_archive, strerror(errno));
+        snprintf(err_msg, err_size, "Cannot create %.256s: %.128s", out_archive, strerror(errno));
         return false;
     }
 
@@ -786,16 +792,13 @@ bool rgss_archive_pack(const char* input_dir, const char* output_archive,
     if (fwrite(header, 1, sizeof(header), out) != sizeof(header)) {
         fclose(out);
         pack_list_free(&list);
-        snprintf(err_msg, err_size, "Failed writing archive header");
+        snprintf(err_msg, err_size, "Failed writing RGSS header");
         return false;
     }
 
-    bool ok = false;
-    if (version == 1) {
-        ok = pack_write_v1(out, &list, suppress_output, err_msg, err_size);
-    } else {
-        ok = pack_write_v3(out, &list, suppress_output, err_msg, err_size);
-    }
+    bool ok = (version == 1)
+        ? write_pack_v1(out, &list, suppress, err_msg, err_size)
+        : write_pack_v3(out, &list, suppress, err_msg, err_size);
 
     fclose(out);
     pack_list_free(&list);
