@@ -50,6 +50,27 @@ static void str_right(const char* src, size_t len, char* dest, size_t dest_size)
     snprintf(dest, dest_size, "%s", start);
 }
 
+// Rejects path-traversal attempts (".."), leading root slashes, or Windows drive letters
+static bool is_safe_rel_path(const char* name) {
+    if (!name || name[0] == '\0') return false;
+    if (name[0] == '/' || name[0] == '\\') return false;
+    if (strlen(name) >= 2 && isalpha((unsigned char)name[0]) && name[1] == ':') return false;
+
+    const char* p = name;
+    while (*p) {
+        const char* seg_start = p;
+        while (*p && *p != '/' && *p != '\\') {
+            p++;
+        }
+        size_t seg_len = (size_t)(p - seg_start);
+        if (seg_len == 2 && seg_start[0] == '.' && seg_start[1] == '.') {
+            return false;
+        }
+        if (*p) p++;
+    }
+    return true;
+}
+
 static void mkdir_recursive(const char* file_path) {
     char tmp[MAX_PATH_LEN];
     snprintf(tmp, sizeof(tmp), "%s", file_path);
@@ -99,6 +120,7 @@ static void format_highlighted_name(const char* name, const char* dir_color,
     }
 }
 
+// Defaults directly to the archive's directory (game directory) when output_arg is NULL/empty
 static void build_output_dir(const char* archive_path, const char* output_arg,
                              char* out_dir, size_t out_size) {
     if (output_arg && (output_arg[0] == '/' || output_arg[0] == '\\' ||
@@ -122,8 +144,8 @@ static void build_output_dir(const char* archive_path, const char* output_arg,
         snprintf(base_dir, sizeof(base_dir), ".");
     }
 
-    if (!output_arg || output_arg[0] == '\0') {
-        snprintf(out_dir, out_size, "%s%cExtracted", base_dir, PATH_SEP);
+    if (!output_arg || output_arg[0] == '\0' || strcmp(output_arg, ".") == 0) {
+        snprintf(out_dir, out_size, "%s", base_dir);
     } else {
         snprintf(out_dir, out_size, "%s%c%s", base_dir, PATH_SEP, output_arg);
     }
@@ -202,6 +224,11 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
     for (size_t i = 0; i < file_count; i++) {
         const RgssFilePointer* ptr = &archive->files[i];
 
+        if (!is_safe_rel_path(ptr->name)) {
+            snprintf(err_msg, err_size, "Unsafe path traversal detected in entry: %s", ptr->name);
+            return false;
+        }
+
         char rel_path[MAX_PATH_LEN];
         snprintf(rel_path, sizeof(rel_path), "%s", ptr->name);
         for (char* p = rel_path; *p; p++) {
@@ -237,9 +264,9 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
 }
 
 static void print_usage(const char* prog_name) {
-    printf("Usage: %s <archive.rgssad|rgss2a|rgss3a> [options]\n\n", prog_name);
+    printf("Usage: %s [options] <archive.rgssad|rgss2a|rgss3a>\n\n", prog_name);
     printf("Options:\n");
-    printf("  -o, --output <dir>   Output directory (default: Extracted)\n");
+    printf("  -o, --output <dir>   Output directory (default: archive's directory)\n");
     printf("  -i, --info           Dump archive file table without extracting\n");
     printf("  -s, --suppress       Suppress per-file extraction output\n");
     printf("  -p, --project        Generate RPG Maker project file (Game.rxproj/rvproj/rvproj2)\n");
@@ -251,7 +278,7 @@ int main(int argc, char* argv[]) {
 
     ProgramArguments args = {
         .rgss_archive = NULL,
-        .output_dir = "Extracted",
+        .output_dir = NULL,
         .info_dump = false,
         .suppress_output = false,
         .create_project_file = false,

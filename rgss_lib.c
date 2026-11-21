@@ -10,7 +10,6 @@
 #define RGSS_V1_INITIAL_KEY 0xDEADCAFEu
 #define IO_BUFFER_SIZE (16 * 1024)
 
-// Little-endian safe readers
 static bool read_u32_le(FILE* f, uint32_t* out) {
     uint8_t b[4];
     if (fread(b, 1, 4, f) != 4) return false;
@@ -25,7 +24,6 @@ static bool read_u8(FILE* f, uint8_t* out) {
     return fread(out, 1, 1, f) == 1;
 }
 
-// Portable cross-platform 64-bit file seek/tell
 static bool seek_u64(FILE* f, uint64_t offset, int origin) {
 #ifdef _WIN32
     return _fseeki64(f, (__int64)offset, origin) == 0;
@@ -44,7 +42,6 @@ static uint64_t tell_u64(FILE* f) {
 #endif
 }
 
-// Equivalent to RgssDecryptionKey(7, 3) LCG step: key = key * 7 + 3
 static inline uint32_t step_key(uint32_t* key) {
     uint32_t current = *key;
     *key = (*key * 7u) + 3u;
