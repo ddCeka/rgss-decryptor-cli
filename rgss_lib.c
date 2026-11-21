@@ -4,17 +4,23 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #ifdef _WIN32
+    #include <io.h>
     #include <windows.h>
     #define PATH_SEP '\\'
+    #define IS_ATTY(fd) (_isatty(fd) != 0)
+    #define FILENO(stream) _fileno(stream)
 #else
     #include <unistd.h>
     #define PATH_SEP '/'
+    #define IS_ATTY(fd) (isatty(fd) != 0)
+    #define FILENO(stream) fileno(stream)
 #endif
 
 #define RGSS_MAGIC "RGSSAD\0"
@@ -23,6 +29,84 @@
 #define RGSS_V3_DEFAULT_SEED 0x03975A21u
 #define IO_BUFFER_SIZE (16 * 1024)
 #define MAX_SCAN_PATH 4096
+
+TermColors g_colors = {
+    .reset        = "",
+    .bold         = "",
+    .err          = "",
+    .ok           = "",
+    .warn         = "",
+    .accent       = "",
+    .dir          = "",
+    .file         = "",
+    .muted        = "",
+    .err_stderr   = "",
+    .reset_stderr = ""
+};
+
+static bool enable_vt_mode(int fd) {
+#ifdef _WIN32
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD mode = 0;
+    if (!GetConsoleMode(h, &mode)) return false;
+    return SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    (void)fd;
+    return true;
+#endif
+}
+
+void rgss_init_colors(void) {
+    const char* no_color = getenv("NO_COLOR");
+    if (no_color && no_color[0] != '\0') return;
+
+    const char* term = getenv("TERM");
+    if (term && strcmp(term, "dumb") == 0) return;
+
+    int out_fd = FILENO(stdout);
+    int err_fd = FILENO(stderr);
+
+    if (IS_ATTY(out_fd) && enable_vt_mode(out_fd)) {
+        g_colors.reset  = "\x1B[0m";
+        g_colors.bold   = "\x1B[1m";
+        g_colors.err    = "\x1B[91m";
+        g_colors.ok     = "\x1B[92m";
+        g_colors.warn   = "\x1B[93m";
+        g_colors.accent = "\x1B[94m";
+        g_colors.dir    = "\x1B[36m";
+        g_colors.file   = "\x1B[97m";
+        g_colors.muted  = "\x1B[90m";
+    }
+
+    if (IS_ATTY(err_fd) && enable_vt_mode(err_fd)) {
+        g_colors.err_stderr   = "\x1B[91m";
+        g_colors.reset_stderr = "\x1B[0m";
+    }
+}
+
+void rgss_format_highlighted_name(const char* name, int pad_width, char* out_buf, size_t out_size) {
+    const char* last_sep = strrchr(name, '\\');
+    const char* last_fsep = strrchr(name, '/');
+    if (last_fsep && (!last_sep || last_fsep > last_sep)) {
+        last_sep = last_fsep;
+    }
+
+    size_t raw_len = strlen(name);
+    int rem = (pad_width > (int)raw_len) ? (pad_width - (int)raw_len) : 0;
+
+    if (last_sep) {
+        size_t dir_len = (size_t)(last_sep - name + 1);
+        snprintf(out_buf, out_size, "%s%.*s%s%s%*s%s",
+                 g_colors.dir, (int)dir_len, name,
+                 g_colors.file, last_sep + 1,
+                 rem, "", g_colors.reset);
+    } else {
+        snprintf(out_buf, out_size, "%s%s%*s%s",
+                 g_colors.file, name,
+                 rem, "", g_colors.reset);
+    }
+}
 
 static bool join_paths_safe(char* dst, size_t dst_size, const char* a, const char* b) {
     if (!a || !b || dst_size == 0) return false;
@@ -571,14 +655,17 @@ static int detect_target_version(const char* out_archive_path) {
 
 static bool write_packed_v1(FILE* out, PackList* list, bool suppress, char* err_msg, size_t err_size) {
     uint32_t key = RGSS_V1_INITIAL_KEY;
+    int digits = (list->count > 0) ? (int)floor(log10((double)list->count) + 1) : 1;
 
     for (size_t i = 0; i < list->count; i++) {
         PackEntry* entry = &list->items[i];
         uint32_t name_len = (uint32_t)strlen(entry->archive_name);
 
         if (!suppress) {
-            printf("[32m[%zu/%zu] Pack:[37m %s[0m[39m\n",
-                   i + 1, list->count, entry->archive_name);
+            char name_highlight[MAX_SCAN_PATH + 64];
+            rgss_format_highlighted_name(entry->archive_name, 0, name_highlight, sizeof(name_highlight));
+            printf("%s[%*zu/%zu] Pack     :%s %s\n",
+                   g_colors.ok, digits, i + 1, list->count, g_colors.reset, name_highlight);
         }
 
         if (!write_u32_le(out, name_len ^ step_key(&key))) {
@@ -622,6 +709,7 @@ static bool write_packed_v1(FILE* out, PackList* list, bool suppress, char* err_
 static bool write_packed_v3(FILE* out, PackList* list, bool suppress, char* err_msg, size_t err_size) {
     uint32_t seed = RGSS_V3_DEFAULT_SEED;
     uint32_t base_key = (seed * 9u) + 3u;
+    int digits = (list->count > 0) ? (int)floor(log10((double)list->count) + 1) : 1;
 
     if (!write_u32_le(out, seed)) {
         snprintf(err_msg, err_size, "Failed writing RGSS3 seed");
@@ -681,8 +769,10 @@ static bool write_packed_v3(FILE* out, PackList* list, bool suppress, char* err_
     for (size_t i = 0; i < list->count; i++) {
         PackEntry* entry = &list->items[i];
         if (!suppress) {
-            printf("[32m[%zu/%zu] Pack:[37m %s[0m[39m\n",
-                   i + 1, list->count, entry->archive_name);
+            char name_highlight[MAX_SCAN_PATH + 64];
+            rgss_format_highlighted_name(entry->archive_name, 0, name_highlight, sizeof(name_highlight));
+            printf("%s[%*zu/%zu] Pack     :%s %s\n",
+                   g_colors.ok, digits, i + 1, list->count, g_colors.reset, name_highlight);
         }
 
         FILE* in = fopen(entry->disk_path, "rb");
@@ -726,10 +816,10 @@ bool rgss_archive_pack(const char* source_dir, const char* out_archive_path, boo
 
     qsort(list.items, list.count, sizeof(PackEntry), compare_pack_entries);
 
-    printf("------\n");
-    printf("Packing %zu Files (RGSS v%d)\n", list.count, version);
-    printf("Output Archive: %s\n", out_archive_path);
-    printf("------\n");
+    printf("%s------%s\n", g_colors.muted, g_colors.reset);
+    printf("Packing %s%zu%s Files (RGSS v%d)\n", g_colors.bold, list.count, g_colors.reset, version);
+    printf("Output Archive: %s%s%s\n", g_colors.dir, out_archive_path, g_colors.reset);
+    printf("%s------%s\n", g_colors.muted, g_colors.reset);
 
     FILE* out = fopen(out_archive_path, "wb");
     if (!out) {

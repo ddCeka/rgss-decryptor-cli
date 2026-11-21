@@ -10,6 +10,28 @@ extern "C" {
 #endif
 
 typedef struct {
+    const char* reset;
+    const char* bold;
+    const char* err;
+    const char* ok;
+    const char* warn;
+    const char* accent;
+    const char* dir;
+    const char* file;
+    const char* muted;
+    const char* err_stderr;
+    const char* reset_stderr;
+} TermColors;
+
+extern TermColors g_colors;
+
+// Initializes g_colors based on TTY status, TERM, and NO_COLOR environment variables.
+void rgss_init_colors(void);
+
+// Formats a relative file path with distinct directory and filename colors.
+void rgss_format_highlighted_name(const char* name, int pad_width, char* out_buf, size_t out_size);
+
+typedef struct {
     char* rgss_archive;
     char* output_dir;
     char* pack_source_dir;
