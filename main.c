@@ -15,6 +15,8 @@
     #define MKDIR(dir) _mkdir(dir)
     #define PATH_SEP '\\'
     #define FILE_EXISTS(path) (_access((path), 0) == 0)
+    #define IS_ATTY(fd) (_isatty(fd) != 0)
+    #define FILENO(stream) _fileno(stream)
 #else
     #include <sys/stat.h>
     #include <sys/types.h>
@@ -22,22 +24,72 @@
     #define MKDIR(dir) mkdir((dir), 0755)
     #define PATH_SEP '/'
     #define FILE_EXISTS(path) (access((path), F_OK) == 0)
+    #define IS_ATTY(fd) (isatty(fd) != 0)
+    #define FILENO(stream) fileno(stream)
 #endif
 
 #include "rgss_lib.h"
 
 #define MAX_PATH_LEN 4096
 
-static void enable_ansi_console(void) {
+// Low-strain ANSI color palette (initialized at runtime)
+static const char* C_RESET      = "";
+static const char* C_BOLD       = "";
+static const char* C_OUT_ERR    = ""; // For stdout errors
+static const char* C_OK         = "";
+static const char* C_WARN       = "";
+static const char* C_ACCENT     = "";
+static const char* C_ALT_ACCENT = "";
+static const char* C_DIR        = "";
+static const char* C_FILE       = "";
+static const char* C_MUTED      = "";
+
+static const char* C_ERR        = ""; // For stderr errors
+static const char* C_ERR_RESET  = "";
+
+static bool enable_vt_mode(int fd) {
 #ifdef _WIN32
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hOut != INVALID_HANDLE_VALUE) {
-        DWORD mode = 0;
-        if (GetConsoleMode(hOut, &mode)) {
-            SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        }
-    }
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD mode = 0;
+    if (!GetConsoleMode(h, &mode)) return false;
+    return SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    (void)fd;
+    return true;
 #endif
+}
+
+static void init_console_colors(void) {
+    const char* no_color = getenv("NO_COLOR");
+    if (no_color && no_color[0] != '\0') return;
+
+    const char* term = getenv("TERM");
+    if (term && strcmp(term, "dumb") == 0) return;
+
+    int out_fd = FILENO(stdout);
+    int err_fd = FILENO(stderr);
+
+    bool use_stdout = IS_ATTY(out_fd) && enable_vt_mode(out_fd);
+    bool use_stderr = IS_ATTY(err_fd) && enable_vt_mode(err_fd);
+
+    if (use_stdout) {
+        C_RESET      = "\x1B[0m";
+        C_BOLD       = "\x1B[1m";
+        C_OUT_ERR    = "\x1B[91m";
+        C_OK         = "\x1B[92m";
+        C_WARN       = "\x1B[93m";
+        C_ACCENT     = "\x1B[36m";
+        C_ALT_ACCENT = "\x1B[94m";
+        C_DIR        = "\x1B[36m";
+        C_FILE       = "\x1B[97m";
+        C_MUTED      = "\x1B[90m";
+    }
+
+    if (use_stderr) {
+        C_ERR       = "\x1B[91m";
+        C_ERR_RESET = "\x1B[0m";
+    }
 }
 
 static bool join_paths(char* dst, size_t dst_size, const char* a, const char* b) {
@@ -174,7 +226,7 @@ static bool build_output_dir(const char* archive_path, const char* output_arg,
 static void create_project_file(const char* rgss_data_file, const char* out_dir) {
     const char* dot = strrchr(rgss_data_file, '.');
     if (!dot) {
-        printf("\x1B[31mCouldn't Determine RPG Maker Version\x1B[39m\n");
+        printf("%sCouldn't Determine RPG Maker Version%s\n", C_OUT_ERR, C_RESET);
         return;
     }
 
@@ -196,13 +248,13 @@ static void create_project_file(const char* rgss_data_file, const char* out_dir)
         proj_name = "Game.rvproj2";
         proj_content = "RPGVXAce 1.00";
     } else {
-        printf("\x1B[31mCouldn't Determine RPG Maker Version\x1B[39m\n");
+        printf("%sCouldn't Determine RPG Maker Version%s\n", C_OUT_ERR, C_RESET);
         return;
     }
 
     char full_path[MAX_PATH_LEN];
     if (!join_paths(full_path, sizeof(full_path), out_dir, proj_name)) {
-        fprintf(stderr, "\x1B[31mProject file path too long\x1B[39m\n");
+        fprintf(stderr, "%sProject file path too long%s\n", C_ERR, C_ERR_RESET);
         return;
     }
 
@@ -214,9 +266,14 @@ static void create_project_file(const char* rgss_data_file, const char* out_dir)
 }
 
 static void dump_info(const RgssArchive* archive) {
-    printf("\x1B[39m%-6s|%-8s|%-42s|%-10s|%-8s\x1B[39m\n",
-           "Num", "Offset", "Name", "Size Bytes", "Key");
-    printf("\x1B[39m------|--------|------------------------------------------|----------|--------\x1B[39m\n");
+    printf("%s%-6s %s|%s %s%-8s %s|%s %s%-42s %s|%s %s%-10s %s|%s %s%-8s%s\n",
+           C_BOLD, "Num", C_MUTED, C_RESET,
+           C_BOLD, "Offset", C_MUTED, C_RESET,
+           C_BOLD, "Name", C_MUTED, C_RESET,
+           C_BOLD, "Size Bytes", C_MUTED, C_RESET,
+           C_BOLD, "Key", C_RESET);
+    printf("%s-------|----------|--------------------------------------------|------------|---------%s\n",
+           C_MUTED, C_RESET);
 
     for (size_t i = 0; i < archive->file_count; i++) {
         const RgssFilePointer* ptr = &archive->files[i];
@@ -224,14 +281,22 @@ static void dump_info(const RgssArchive* archive) {
         char name_highlight[128];
 
         str_right(ptr->name, 42, clip_name, sizeof(clip_name));
-        format_highlighted_name(clip_name, "\x1B[30;1m", "\x1B[37;1m", "\x1B[0m",
+        format_highlighted_name(clip_name, C_DIR, C_FILE, C_RESET,
                                 42, name_highlight, sizeof(name_highlight));
 
-        printf("\x1B[39m%6zu\x1B[39m|\x1B[31m%08llX\x1B[39m|%s\x1B[39m|\x1B[40m%-10u\x1B[39m|\x1B[32m%08X\x1B[39m\n",
-               i, (unsigned long long)ptr->offset, name_highlight, ptr->size, ptr->key);
+        printf("%s%6zu |%s %s%08llX%s %s|%s %s %s|%s %s%-10u%s %s|%s %s%08X%s\n",
+               C_MUTED, i, C_RESET,
+               C_ALT_ACCENT, (unsigned long long)ptr->offset, C_RESET,
+               C_MUTED, C_RESET,
+               name_highlight,
+               C_MUTED, C_RESET,
+               C_WARN, ptr->size, C_RESET,
+               C_MUTED, C_RESET,
+               C_OK, ptr->key, C_RESET);
     }
 
-    printf("\x1B[39m------|--------|------------------------------------------|----------|--------\x1B[39m\n");
+    printf("%s-------|----------|--------------------------------------------|------------|---------%s\n",
+           C_MUTED, C_RESET);
 }
 
 static bool extract_files(const RgssArchive* archive, const char* out_dir, bool suppress,
@@ -239,10 +304,10 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
     size_t file_count = archive->file_count;
     int digits = (file_count > 0) ? (int)floor(log10((double)file_count) + 1) : 1;
 
-    printf("------\n");
-    printf("%zu Files Found\n", file_count);
-    printf("Output Folder: %s\n", out_dir);
-    printf("------\n");
+    printf("%s------%s\n", C_MUTED, C_RESET);
+    printf("%s%zu%s Files Found\n", C_ACCENT, file_count, C_RESET);
+    printf("Output Folder: %s%s%s\n", C_DIR, out_dir, C_RESET);
+    printf("%s------%s\n", C_MUTED, C_RESET);
 
     for (size_t i = 0; i < file_count; i++) {
         const RgssFilePointer* ptr = &archive->files[i];
@@ -267,15 +332,15 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
         if (!suppress) {
             bool exists = FILE_EXISTS(target_path);
             char name_highlight[MAX_PATH_LEN + 64];
-            format_highlighted_name(ptr->name, "\x1B[1;30m", "\x1B[37m", "\x1B[2;37m",
+            format_highlighted_name(ptr->name, C_DIR, C_FILE, C_RESET,
                                     0, name_highlight, sizeof(name_highlight));
 
             if (exists) {
-                printf("\x1B[31m[%*zu/%zu] Overwrite:\x1B[37m %s\x1B[0m\x1B[39m\n",
-                       digits, i + 1, file_count, name_highlight);
+                printf("%s[%*zu/%zu] Overwrite:%s %s\n",
+                       C_WARN, digits, i + 1, file_count, C_RESET, name_highlight);
             } else {
-                printf("\x1B[32m[%*zu/%zu] Create   :\x1B[37m %s\x1B[0m\x1B[39m\n",
-                       digits, i + 1, file_count, name_highlight);
+                printf("%s[%*zu/%zu] Create   :%s %s\n",
+                       C_OK, digits, i + 1, file_count, C_RESET, name_highlight);
             }
         }
 
@@ -290,25 +355,33 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
 }
 
 static void print_usage(const char* prog_name) {
-    printf("Usage:\n");
-    printf("  %s [options] <archive.rgssad|rgss2a|rgss3a>\n", prog_name);
-    printf("  %s --pack <source_dir> <output.rgssad|rgss2a|rgss3a>\n\n", prog_name);
-    printf("Unpack Options:\n");
-    printf("  -o, --output <dir>    Output directory relative to archive\n");
-    printf("                        (default: archive dir)\n");
-    printf("  -i, --info            Dump archive file table without extracting\n");
-    printf("  -s, --suppress        Suppress per-file output\n");
-    printf("  -p, --project         Generate RPG Maker project file\n");
-    printf("                        (Game.rxproj/rvproj/rvproj2)\n\n");
-    printf("Repack Options:\n");
-    printf("  --pack   <dir>        Pack directory into specified RGSS archive\n");
-    printf("  --repack <dir>        An alias of --pack command option\n\n");
-    printf("General:\n");
-    printf("  -h, --help            Show this help message\n");
+    printf("%sUsage:%s\n", C_BOLD, C_RESET);
+    printf("  %s%s%s [options] %s<archive.rgssad|rgss2a|rgss3a>%s\n",
+           C_ACCENT, prog_name, C_RESET, C_WARN, C_RESET);
+    printf("  %s%s%s --pack %s<source_dir> <output.rgssad|rgss2a|rgss3a>%s\n\n",
+           C_ACCENT, prog_name, C_RESET, C_WARN, C_RESET);
+
+    printf("%sUnpack Options:%s\n", C_BOLD, C_RESET);
+    printf("  %s-o, --output%s %s<dir>%s    Output directory relative to archive\n",
+           C_OK, C_RESET, C_MUTED, C_RESET);
+    printf("                        %s(default: archive dir)%s\n", C_MUTED, C_RESET);
+    printf("  %s-i, --info%s            Dump archive file table without extracting\n", C_OK, C_RESET);
+    printf("  %s-s, --suppress%s        Suppress per-file output\n", C_OK, C_RESET);
+    printf("  %s-p, --project%s         Generate RPG Maker project file\n", C_OK, C_RESET);
+    printf("                        %s(Game.rxproj/rvproj/rvproj2)%s\n\n", C_MUTED, C_RESET);
+
+    printf("%sRepack Options:%s\n", C_BOLD, C_RESET);
+    printf("  %s--pack%s   %s<dir>%s        Pack directory into specified RGSS archive\n",
+           C_OK, C_RESET, C_MUTED, C_RESET);
+    printf("  %s--repack%s %s<dir>%s        An alias of --pack command option\n\n",
+           C_OK, C_RESET, C_MUTED, C_RESET);
+
+    printf("%sGeneral:%s\n", C_BOLD, C_RESET);
+    printf("  %s-h, --help%s            Show this help message\n", C_OK, C_RESET);
 }
 
 int main(int argc, char* argv[]) {
-    enable_ansi_console();
+    init_console_colors();
 
     ProgramArguments args = {
         .rgss_archive = NULL,
@@ -338,7 +411,7 @@ int main(int argc, char* argv[]) {
         } else if (argv[i][0] != '-') {
             args.rgss_archive = argv[i];
         } else {
-            fprintf(stderr, "\x1B[31mUnknown or incomplete option: %s\x1B[39m\n", argv[i]);
+            fprintf(stderr, "%sUnknown or incomplete option: %s%s\n", C_ERR, argv[i], C_ERR_RESET);
             print_usage(argv[0]);
             return 1;
         }
@@ -348,17 +421,19 @@ int main(int argc, char* argv[]) {
 
     if (args.pack_mode) {
         if (args.info_dump || args.create_project_file || args.output_dir != NULL) {
-            fprintf(stderr, "\x1B[31mError: --pack/--repack cannot be combined with -i, -p, or -o.\x1B[39m\n");
+            fprintf(stderr, "%sError: --pack/--repack cannot be combined with -i, -p, or -o.%s\n",
+                    C_ERR, C_ERR_RESET);
             return 1;
         }
         if (!args.pack_source_dir || !args.rgss_archive) {
-            fprintf(stderr, "\x1B[31mError: --pack/--repack requires both <source_dir> and <output_archive>.\x1B[39m\n");
+            fprintf(stderr, "%sError: --pack/--repack requires both <source_dir> and <output_archive>.%s\n",
+                    C_ERR, C_ERR_RESET);
             print_usage(argv[0]);
             return 1;
         }
         if (!rgss_archive_pack(args.pack_source_dir, args.rgss_archive, args.suppress_output,
                                err_msg, sizeof(err_msg))) {
-            fprintf(stderr, "\x1B[31mError packing archive: %s\x1B[39m\n", err_msg);
+            fprintf(stderr, "%sError packing archive: %s%s\n", C_ERR, err_msg, C_ERR_RESET);
             return 1;
         }
         return 0;
@@ -371,22 +446,22 @@ int main(int argc, char* argv[]) {
 
     int ver = rgss_get_version(args.rgss_archive);
     if (ver == -1) {
-        printf("\x1B[31mInvalid RGSSAD Archive\x1B[39m\n");
+        printf("%sInvalid RGSSAD Archive%s\n", C_OUT_ERR, C_RESET);
         return 1;
     } else if (ver != 1 && ver != 3) {
-        printf("\x1B[31mUnknown RGSSAD Version\x1B[39m\n");
+        printf("%sUnknown RGSSAD Version%s\n", C_OUT_ERR, C_RESET);
         return 1;
     }
 
     RgssArchive archive = {0};
     if (!rgss_archive_open(&archive, args.rgss_archive, ver, err_msg, sizeof(err_msg))) {
-        printf("\x1B[31mError reading the archive: %s\x1B[39m\n", err_msg);
+        printf("%sError reading the archive: %s%s\n", C_OUT_ERR, err_msg, C_RESET);
         return 1;
     }
 
     char out_dir[MAX_PATH_LEN];
     if (!build_output_dir(args.rgss_archive, args.output_dir, out_dir, sizeof(out_dir))) {
-        printf("\x1B[31mError: Output directory path is too long\x1B[39m\n");
+        printf("%sError: Output directory path is too long%s\n", C_OUT_ERR, C_RESET);
         rgss_archive_free(&archive);
         return 1;
     }
@@ -396,7 +471,7 @@ int main(int argc, char* argv[]) {
         dump_info(&archive);
     } else {
         if (!extract_files(&archive, out_dir, args.suppress_output, err_msg, sizeof(err_msg))) {
-            printf("\x1B[31mError extracting files: %s\x1B[39m\n", err_msg);
+            printf("%sError extracting files: %s%s\n", C_OUT_ERR, err_msg, C_RESET);
             exit_code = 1;
         } else if (args.create_project_file) {
             create_project_file(args.rgss_archive, out_dir);
