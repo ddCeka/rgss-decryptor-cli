@@ -12,12 +12,11 @@ extern "C" {
 typedef struct {
     char* rgss_archive;
     char* output_dir;
-    char* pack_dir;
+    char* pack_source_dir;
+    bool pack_mode;
     bool info_dump;
     bool suppress_output;
     bool create_project_file;
-    bool register_context;
-    bool unregister_context;
 } ProgramArguments;
 
 typedef struct {
@@ -45,9 +44,9 @@ bool rgss_archive_open(RgssArchive* archive, const char* path, int version, char
 bool rgss_extract_file_to_disk(const RgssArchive* archive, const RgssFilePointer* fp,
                                const char* target_path, char* err_msg, size_t err_size);
 
-// Recursively packs input_dir into output_archive (.rgssad, .rgss2a, or .rgss3a).
-bool rgss_archive_pack(const char* input_dir, const char* output_archive,
-                       bool suppress_output, char* err_msg, size_t err_size);
+// Packs a directory recursively into an RGSS1/2 (.rgssad/.rgss2a) or RGSS3 (.rgss3a) archive.
+bool rgss_archive_pack(const char* source_dir, const char* out_archive_path, bool suppress,
+                       char* err_msg, size_t err_size);
 
 // Frees all heap memory associated with the archive.
 void rgss_archive_free(RgssArchive* archive);

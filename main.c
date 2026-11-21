@@ -40,22 +40,21 @@ static void enable_ansi_console(void) {
 #endif
 }
 
-static bool join_paths(char* dst, size_t dst_size, const char* dir, const char* leaf) {
-    size_t dlen = strlen(dir);
-    size_t llen = strlen(leaf);
+static bool join_paths(char* dst, size_t dst_size, const char* a, const char* b) {
+    if (!a || !b || dst_size == 0) return false;
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+    bool need_sep = (len_a > 0 && a[len_a - 1] != '/' && a[len_a - 1] != '\\');
+    size_t total = len_a + (need_sep ? 1 : 0) + len_b;
+    if (total >= dst_size) return false;
 
-    while (dlen > 0 && (dir[dlen - 1] == '/' || dir[dlen - 1] == '\\')) {
-        dlen--;
+    memcpy(dst, a, len_a);
+    size_t pos = len_a;
+    if (need_sep) {
+        dst[pos++] = PATH_SEP;
     }
-
-    if (dlen + 1 + llen + 1 > dst_size) {
-        return false;
-    }
-
-    memcpy(dst, dir, dlen);
-    dst[dlen] = PATH_SEP;
-    memcpy(dst + dlen + 1, leaf, llen);
-    dst[dlen + 1 + llen] = '\0';
+    memcpy(dst + pos, b, len_b);
+    dst[pos + len_b] = '\0';
     return true;
 }
 
@@ -66,31 +65,25 @@ static void str_right(const char* src, size_t len, char* dest, size_t dest_size)
     }
     size_t src_len = strlen(src);
     const char* start = (src_len > len) ? (src + (src_len - len)) : src;
-    size_t copy_len = strlen(start);
-    if (copy_len >= dest_size) {
-        copy_len = dest_size - 1;
-    }
-    memcpy(dest, start, copy_len);
-    dest[copy_len] = '\0';
+    snprintf(dest, dest_size, "%s", start);
 }
 
 static bool is_safe_rel_path(const char* rel_path) {
     if (!rel_path || rel_path[0] == '\0') return false;
     if (rel_path[0] == '/' || rel_path[0] == '\\') return false;
-    if (isalpha((unsigned char)rel_path[0]) && rel_path[1] == ':') return false;
+    if (strlen(rel_path) >= 2 && isalpha((unsigned char)rel_path[0]) && rel_path[1] == ':') {
+        return false;
+    }
 
-    const char* p = rel_path;
-    while (*p) {
-        const char* seg_start = p;
-        while (*p && *p != '/' && *p != '\\') {
-            p++;
-        }
-        size_t seg_len = (size_t)(p - seg_start);
-        if (seg_len == 2 && seg_start[0] == '.' && seg_start[1] == '.') {
-            return false;
-        }
-        if (*p == '/' || *p == '\\') {
-            p++;
+    const char* seg_start = rel_path;
+    for (const char* p = rel_path; ; p++) {
+        if (*p == '/' || *p == '\\' || *p == '\0') {
+            size_t seg_len = (size_t)(p - seg_start);
+            if (seg_len == 2 && seg_start[0] == '.' && seg_start[1] == '.') {
+                return false;
+            }
+            if (*p == '\0') break;
+            seg_start = p + 1;
         }
     }
     return true;
@@ -98,9 +91,7 @@ static bool is_safe_rel_path(const char* rel_path) {
 
 static void mkdir_recursive(const char* file_path) {
     char tmp[MAX_PATH_LEN];
-    size_t len = strlen(file_path);
-    if (len >= sizeof(tmp)) return;
-    memcpy(tmp, file_path, len + 1);
+    snprintf(tmp, sizeof(tmp), "%s", file_path);
 
     char* last_slash = NULL;
     for (char* p = tmp; *p; p++) {
@@ -150,17 +141,14 @@ static void format_highlighted_name(const char* name, const char* dir_color,
 static bool build_output_dir(const char* archive_path, const char* output_arg,
                              char* out_dir, size_t out_size) {
     if (output_arg && (output_arg[0] == '/' || output_arg[0] == '\\' ||
-        (isalpha((unsigned char)output_arg[0]) && output_arg[1] == ':'))) {
-        size_t len = strlen(output_arg);
-        if (len >= out_size) return false;
-        memcpy(out_dir, output_arg, len + 1);
+        (strlen(output_arg) > 1 && output_arg[1] == ':'))) {
+        if (strlen(output_arg) >= out_size) return false;
+        snprintf(out_dir, out_size, "%s", output_arg);
         return true;
     }
 
     char base_dir[MAX_PATH_LEN];
-    size_t arch_len = strlen(archive_path);
-    if (arch_len >= sizeof(base_dir)) return false;
-    memcpy(base_dir, archive_path, arch_len + 1);
+    snprintf(base_dir, sizeof(base_dir), "%s", archive_path);
 
     char* last_sep = strrchr(base_dir, '\\');
     char* last_fsep = strrchr(base_dir, '/');
@@ -171,14 +159,12 @@ static bool build_output_dir(const char* archive_path, const char* output_arg,
     if (last_sep) {
         *last_sep = '\0';
     } else {
-        base_dir[0] = '.';
-        base_dir[1] = '\0';
+        snprintf(base_dir, sizeof(base_dir), ".");
     }
 
     if (!output_arg || output_arg[0] == '\0' || strcmp(output_arg, ".") == 0) {
-        size_t blen = strlen(base_dir);
-        if (blen >= out_size) return false;
-        memcpy(out_dir, base_dir, blen + 1);
+        if (strlen(base_dir) >= out_size) return false;
+        snprintf(out_dir, out_size, "%s", base_dir);
         return true;
     }
 
@@ -216,7 +202,7 @@ static void create_project_file(const char* rgss_data_file, const char* out_dir)
 
     char full_path[MAX_PATH_LEN];
     if (!join_paths(full_path, sizeof(full_path), out_dir, proj_name)) {
-        fprintf(stderr, "\x1B[31mProject file path exceeds maximum length\x1B[39m\n");
+        fprintf(stderr, "\x1B[31mProject file path too long\x1B[39m\n");
         return;
     }
 
@@ -235,7 +221,7 @@ static void dump_info(const RgssArchive* archive) {
     for (size_t i = 0; i < archive->file_count; i++) {
         const RgssFilePointer* ptr = &archive->files[i];
         char clip_name[64];
-        char name_highlight[160];
+        char name_highlight[128];
 
         str_right(ptr->name, 42, clip_name, sizeof(clip_name));
         format_highlighted_name(clip_name, "\x1B[30;1m", "\x1B[37;1m", "\x1B[0m",
@@ -262,24 +248,19 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
         const RgssFilePointer* ptr = &archive->files[i];
 
         if (!is_safe_rel_path(ptr->name)) {
-            snprintf(err_msg, err_size, "Unsafe path traversal detected in archive entry: %.256s", ptr->name);
+            snprintf(err_msg, err_size, "Unsafe path traversal detected in entry: %.256s", ptr->name);
             return false;
         }
 
         char rel_path[MAX_PATH_LEN];
-        size_t nlen = strlen(ptr->name);
-        if (nlen >= sizeof(rel_path)) {
-            snprintf(err_msg, err_size, "Archive entry path too long: %.256s", ptr->name);
-            return false;
-        }
-        memcpy(rel_path, ptr->name, nlen + 1);
+        snprintf(rel_path, sizeof(rel_path), "%s", ptr->name);
         for (char* p = rel_path; *p; p++) {
             if (*p == '\\' || *p == '/') *p = PATH_SEP;
         }
 
         char target_path[MAX_PATH_LEN];
         if (!join_paths(target_path, sizeof(target_path), out_dir, rel_path)) {
-            snprintf(err_msg, err_size, "Target path exceeds maximum length: %.256s", ptr->name);
+            snprintf(err_msg, err_size, "Output path too long for entry: %.256s", ptr->name);
             return false;
         }
 
@@ -311,15 +292,17 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
 static void print_usage(const char* prog_name) {
     printf("Usage:\n");
     printf("  %s [options] <archive.rgssad|rgss2a|rgss3a>\n", prog_name);
-    printf("  %s --pack <source_dir> <output.rgssad|rgss2a|rgss3a> [-s]\n\n", prog_name);
+    printf("  %s --pack <source_dir> <output.rgssad|rgss2a|rgss3a>\n\n", prog_name);
     printf("Unpack Options:\n");
-    printf("  -o, --output <dir>   Output directory (default: archive's directory)\n");
-    printf("  -i, --info           Dump archive file table without extracting\n");
-    printf("  -s, --suppress       Suppress per-file progress output\n");
-    printf("  -p, --project        Generate RPG Maker project file (Game.rxproj/rvproj/rvproj2)\n");
-    printf("  -h, --help           Show this help message\n\n");
-    printf("Pack Options (Guarded):\n");
-    printf("  --pack, --repack <dir> <archive>   Pack folder into a new RGSS archive\n");
+    printf("  -o, --output <dir>    Output directory relative to archive (default: archive dir)\n");
+    printf("  -i, --info            Dump archive file table without extracting\n");
+    printf("  -s, --suppress        Suppress per-file output\n");
+    printf("  -p, --project         Generate RPG Maker project file (Game.rxproj/rvproj/rvproj2)\n\n");
+    printf("Repack Options:\n");
+    printf("  --pack   <dir>        Pack directory into specified RGSS archive\n\n");
+    printf("  --repack <dir>        An alias of --pack command option\n\n");
+    printf("General:\n");
+    printf("  -h, --help            Show this help message\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -332,9 +315,7 @@ int main(int argc, char* argv[]) {
         .pack_mode = false,
         .info_dump = false,
         .suppress_output = false,
-        .create_project_file = false,
-        .register_context = false,
-        .unregister_context = false
+        .create_project_file = false
     };
 
     for (int i = 1; i < argc; i++) {
@@ -349,10 +330,9 @@ int main(int argc, char* argv[]) {
             args.create_project_file = true;
         } else if ((strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) && i + 1 < argc) {
             args.output_dir = argv[++i];
-        } else if ((strcmp(argv[i], "--pack") == 0 || strcmp(argv[i], "--repack") == 0) && i + 2 < argc) {
+        } else if ((strcmp(argv[i], "--pack") == 0 || strcmp(argv[i], "--repack") == 0) && i + 1 < argc) {
             args.pack_mode = true;
             args.pack_source_dir = argv[++i];
-            args.rgss_archive = argv[++i];
         } else if (argv[i][0] != '-') {
             args.rgss_archive = argv[i];
         } else {
@@ -366,7 +346,12 @@ int main(int argc, char* argv[]) {
 
     if (args.pack_mode) {
         if (args.info_dump || args.create_project_file || args.output_dir != NULL) {
-            fprintf(stderr, "\x1B[31mError: --pack/--repack cannot be combined with -i, -p, or -o\x1B[39m\n");
+            fprintf(stderr, "\x1B[31mError: --pack/--repack cannot be combined with -i, -p, or -o.\x1B[39m\n");
+            return 1;
+        }
+        if (!args.pack_source_dir || !args.rgss_archive) {
+            fprintf(stderr, "\x1B[31mError: --pack/--repack requires both <source_dir> and <output_archive>.\x1B[39m\n");
+            print_usage(argv[0]);
             return 1;
         }
         if (!rgss_archive_pack(args.pack_source_dir, args.rgss_archive, args.suppress_output,
@@ -399,7 +384,7 @@ int main(int argc, char* argv[]) {
 
     char out_dir[MAX_PATH_LEN];
     if (!build_output_dir(args.rgss_archive, args.output_dir, out_dir, sizeof(out_dir))) {
-        printf("\x1B[31mOutput directory path exceeds maximum length\x1B[39m\n");
+        printf("\x1B[31mError: Output directory path is too long\x1B[39m\n");
         rgss_archive_free(&archive);
         return 1;
     }
