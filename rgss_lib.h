@@ -12,6 +12,7 @@ extern "C" {
 typedef struct {
     char* rgss_archive;
     char* output_dir;
+    char* pack_dir;
     bool info_dump;
     bool suppress_output;
     bool create_project_file;
@@ -43,6 +44,10 @@ bool rgss_archive_open(RgssArchive* archive, const char* path, int version, char
 // Extracts and decrypts a single file entry to target_path. Enforces strict size check.
 bool rgss_extract_file_to_disk(const RgssArchive* archive, const RgssFilePointer* fp,
                                const char* target_path, char* err_msg, size_t err_size);
+
+// Recursively packs input_dir into output_archive (.rgssad, .rgss2a, or .rgss3a).
+bool rgss_archive_pack(const char* input_dir, const char* output_archive,
+                       bool suppress_output, char* err_msg, size_t err_size);
 
 // Frees all heap memory associated with the archive.
 void rgss_archive_free(RgssArchive* archive);

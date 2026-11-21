@@ -50,13 +50,19 @@ static void str_right(const char* src, size_t len, char* dest, size_t dest_size)
     snprintf(dest, dest_size, "%s", start);
 }
 
-// Rejects path-traversal attempts (".."), leading root slashes, or Windows drive letters
-static bool is_safe_rel_path(const char* name) {
-    if (!name || name[0] == '\0') return false;
-    if (name[0] == '/' || name[0] == '\\') return false;
-    if (strlen(name) >= 2 && isalpha((unsigned char)name[0]) && name[1] == ':') return false;
+// Rejects empty paths, leading slashes, Windows drive letters, and any ".." path segment
+static bool is_safe_rel_path(const char* archive_entry_name) {
+    if (!archive_entry_name || archive_entry_name[0] == '\0') {
+        return false;
+    }
+    if (archive_entry_name[0] == '/' || archive_entry_name[0] == '\\') {
+        return false;
+    }
+    if (isalpha((unsigned char)archive_entry_name[0]) && archive_entry_name[1] == ':') {
+        return false;
+    }
 
-    const char* p = name;
+    const char* p = archive_entry_name;
     while (*p) {
         const char* seg_start = p;
         while (*p && *p != '/' && *p != '\\') {
@@ -66,7 +72,9 @@ static bool is_safe_rel_path(const char* name) {
         if (seg_len == 2 && seg_start[0] == '.' && seg_start[1] == '.') {
             return false;
         }
-        if (*p) p++;
+        if (*p) {
+            p++;
+        }
     }
     return true;
 }
@@ -120,7 +128,6 @@ static void format_highlighted_name(const char* name, const char* dir_color,
     }
 }
 
-// Defaults directly to the archive's directory (game directory) when output_arg is NULL/empty
 static void build_output_dir(const char* archive_path, const char* output_arg,
                              char* out_dir, size_t out_size) {
     if (output_arg && (output_arg[0] == '/' || output_arg[0] == '\\' ||
@@ -225,7 +232,7 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
         const RgssFilePointer* ptr = &archive->files[i];
 
         if (!is_safe_rel_path(ptr->name)) {
-            snprintf(err_msg, err_size, "Unsafe path traversal detected in entry: %s", ptr->name);
+            snprintf(err_msg, err_size, "Unsafe path traversal entry rejected: %s", ptr->name);
             return false;
         }
 
@@ -236,7 +243,11 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
         }
 
         char target_path[MAX_PATH_LEN];
-        snprintf(target_path, sizeof(target_path), "%s%c%s", out_dir, PATH_SEP, rel_path);
+        int written = snprintf(target_path, sizeof(target_path), "%s%c%s", out_dir, PATH_SEP, rel_path);
+        if (written < 0 || (size_t)written >= sizeof(target_path)) {
+            snprintf(err_msg, err_size, "Target path too long for entry: %s", ptr->name);
+            return false;
+        }
 
         if (!suppress) {
             bool exists = FILE_EXISTS(target_path);
@@ -264,13 +275,18 @@ static bool extract_files(const RgssArchive* archive, const char* out_dir, bool 
 }
 
 static void print_usage(const char* prog_name) {
-    printf("Usage: %s [options] <archive.rgssad|rgss2a|rgss3a>\n\n", prog_name);
-    printf("Options:\n");
-    printf("  -o, --output <dir>   Output directory (default: archive's directory)\n");
-    printf("  -i, --info           Dump archive file table without extracting\n");
-    printf("  -s, --suppress       Suppress per-file extraction output\n");
-    printf("  -p, --project        Generate RPG Maker project file (Game.rxproj/rvproj/rvproj2)\n");
-    printf("  -h, --help           Show this help message\n");
+    printf("Usage:\n");
+    printf("  Unpack: %s [options] <archive.rgssad|rgss2a|rgss3a>\n", prog_name);
+    printf("  Repack: %s --pack <folder> <output.rgssad|rgss2a|rgss3a> [-s]\n\n", prog_name);
+    printf("Unpack Options:\n");
+    printf("  -o, --output <dir>       Output directory (default: archive's directory)\n");
+    printf("  -i, --info               Dump archive file table without extracting\n");
+    printf("  -p, --project            Generate RPG Maker project file (Game.rxproj/rvproj/rvproj2)\n");
+    printf("\nRepack Options (guarded):\n");
+    printf("  --pack, --repack <dir>   Pack <dir> into <output.rgssad|rgss2a|rgss3a>\n");
+    printf("\nGeneral Options:\n");
+    printf("  -s, --suppress           Suppress per-file progress output\n");
+    printf("  -h, --help               Show this help message\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -279,6 +295,7 @@ int main(int argc, char* argv[]) {
     ProgramArguments args = {
         .rgss_archive = NULL,
         .output_dir = NULL,
+        .pack_dir = NULL,
         .info_dump = false,
         .suppress_output = false,
         .create_project_file = false,
@@ -298,15 +315,38 @@ int main(int argc, char* argv[]) {
             args.create_project_file = true;
         } else if ((strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) && i + 1 < argc) {
             args.output_dir = argv[++i];
+        } else if ((strcmp(argv[i], "--pack") == 0 || strcmp(argv[i], "--repack") == 0) && i + 1 < argc) {
+            args.pack_dir = argv[++i];
         } else if (argv[i][0] != '-') {
             args.rgss_archive = argv[i];
         } else {
-            fprintf(stderr, "\x1B[31mUnknown option: %s\x1B[39m\n", argv[i]);
+            fprintf(stderr, "\x1B[31mUnknown or incomplete option: %s\x1B[39m\n", argv[i]);
             print_usage(argv[0]);
             return 1;
         }
     }
 
+    // Guarded Repack Mode
+    if (args.pack_dir != NULL) {
+        if (args.info_dump || args.create_project_file || args.output_dir != NULL) {
+            fprintf(stderr, "\x1B[31mError: --pack/--repack cannot be combined with -i, -p, or -o\x1B[39m\n");
+            return 1;
+        }
+        if (!args.rgss_archive || args.rgss_archive[0] == '\0') {
+            fprintf(stderr, "\x1B[31mError: --pack/--repack requires an output archive path (e.g. Game.rgss3a)\x1B[39m\n");
+            print_usage(argv[0]);
+            return 1;
+        }
+
+        char err_msg[512] = {0};
+        if (!rgss_archive_pack(args.pack_dir, args.rgss_archive, args.suppress_output, err_msg, sizeof(err_msg))) {
+            fprintf(stderr, "\x1B[31mError packing archive: %s\x1B[39m\n", err_msg);
+            return 1;
+        }
+        return 0;
+    }
+
+    // Standard Unpack / Info Mode
     if (!args.rgss_archive || args.rgss_archive[0] == '\0') {
         print_usage(argv[0]);
         return 1;
